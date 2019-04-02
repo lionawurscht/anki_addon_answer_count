@@ -19,19 +19,28 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 # This Module
 import anki
 import aqt
+import aqt.deckconf
 from anki.hooks import addHook, wrap
 from aqt import mw
 from aqt.utils import showInfo
 
 # Default values
-ANSWER_COUNT_TAG = "multiple_answers"
+AC_TAG = "multiple_answers"
+
+AC_QUESTION_FIELD = "Front"
+
+AC_ANSWER_FIELD = "Back"
+
+AC_DEFAULT_SPLIT_CHAR = ","
+
+DEFAULT_CONF = {
+    "ac_question_field": AC_QUESTION_FIELD,
+    "ac_answer_field": AC_ANSWER_FIELD,
+    "ac_tag": AC_TAG,
+    "ac_default_split_char": AC_DEFAULT_SPLIT_CHAR,
+}
 
 SPLIT_CHARS = {"space": " "}
-
-ANSWER_FIELD_NAME = "Back"
-
-DEFAULT_SPLIT_CHAR = ","
-
 
 # So I'm not pestered with havin to transform stuff to string manually
 def show_info(*args):
@@ -44,27 +53,29 @@ def show_info(*args):
 # The filter that does the actual work
 
 
-def on_prepare_qa(to_review, card, type_):
-    """Gets the question before it is shown and count the answers. Returns an
-    altered question as a `str`."""
-
+def on_munge_fields(fields, model, data, self):
+    deckconf = self.decks.confForDid(data[3])
     qc = mw.col.conf
+    conf = {}
 
-    answer_count_tag = qc["ac_tag"]
-    answer_field_name = qc["ac_answer_field"]
-    default_split_char = qc["ac_default_split_char"]
+    keys = DEFAULT_CONF.keys()
 
-    if type_ not in ["reviewQuestion", "previewQuestion"]:
-        return to_review
+    for key in keys:
+        conf[key] = deckconf.get(key, qc[key])
+
+    answer_count_tag = conf["ac_tag"]
+    answer_field = conf["ac_answer_field"]
+    question_field = conf["ac_question_field"]
+    default_split_char = conf["ac_default_split_char"]
+
+    # show_info(fields)
+    answer = fields[answer_field]
 
     # Now we know we're dealing with a question
-    question = to_review
-
-    # Get the note
-    note = card.note()
+    question = fields[question_field]
 
     # Get the tags
-    tags = note.stringTags().split(" ")
+    tags = fields["Tags"].split(" ")
 
     # Find the split chars
     answer_count_tag_suffixes = [
@@ -75,7 +86,7 @@ def on_prepare_qa(to_review, card, type_):
     # multiple answers
 
     if not answer_count_tag_suffixes:
-        return question
+        return fields
 
     # Actually only get the split char minus the `_`
     answers_split_chars = [suffix[1:] for suffix in answer_count_tag_suffixes if suffix]
@@ -88,15 +99,6 @@ def on_prepare_qa(to_review, card, type_):
     answers_split_chars = [
         SPLIT_CHARS.get(split_char, split_char) for split_char in answers_split_chars
     ]
-
-    # Get the answer
-    try:
-        answer = note[answer_field_name]
-    except KeyError:
-        return question
-
-    # We are not interested in newlines
-    answer = answer.strip("\n")
 
     # The loop assumes a list of strings for each iteration ...
     answers = [answer]
@@ -112,27 +114,54 @@ def on_prepare_qa(to_review, card, type_):
     # Get the the answer count
     answer_count = len(answers)
 
-    question_lines = question.split("\n")
-
-    # Find the last line with text in it.
-
-    for i, line in enumerate(reversed(question_lines)):
-        if line.strip():
-            break
-
-    # get the actual index
-    i = len(question_lines) - i - 1
-
     # Add the answer count to the question
-    question_lines[i] = f"{question_lines[i]} ({answer_count})"
+    question = f"{question} ({answer_count})"
 
+    fields[question_field] = question
     # And return a string
 
-    return "\n".join(question_lines)
+    return fields
 
 
-addHook("prepareQA", on_prepare_qa)
+addHook("mungeFields", on_munge_fields)
+
 # Preference menu
+
+
+class OptionComboBox(QtWidgets.QComboBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.has_changed = False
+        self.activated.connect(self.changed)
+
+    def changed(self, *__):
+        self.has_changed = True
+
+
+class OptionLineEdit(QtWidgets.QLineEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.has_changed = False
+        self.textChanged.connect(self.changed)
+
+    def changed(self, *__):
+        self.has_changed = True
+
+
+def get_field_names(mw):
+    model_manager = mw.col.models
+    models = model_manager.all()
+    field_names = [model_manager.fieldNames(m) for m in models]
+    # Flatten the list and make sure every name only occurs once
+    field_names = set(
+        [
+            field_name
+            for field_name_group in field_names
+            for field_name in field_name_group
+        ]
+    )
+
+    return field_names
 
 
 def ac_preferences_setup_ui(self, Preferences):
@@ -152,18 +181,27 @@ def ac_preferences_setup_ui(self, Preferences):
     ac_tag_label.setToolTip(
         "The tag used to find the cards on which to count the answers."
     )
-    self.ac_tag_edit = QtWidgets.QLineEdit(self.ac_tab)
+    self.ac_tag_edit = OptionLineEdit(self.ac_tab)
     self.ac_vl.addWidget(ac_tag_label, row, 0)
     self.ac_vl.addWidget(self.ac_tag_edit, row, 1)
+    row += 1
+
+    ac_question_field_label = QtWidgets.QLabel("Question field")
+    ac_question_field_label.setToolTip(
+        "The name of the field that the question should be gotten from."
+    )
+    self.ac_question_field_combo = OptionComboBox(self.ac_tab)
+    self.ac_vl.addWidget(ac_question_field_label, row, 0)
+    self.ac_vl.addWidget(self.ac_question_field_combo, row, 1)
     row += 1
 
     ac_answer_field_label = QtWidgets.QLabel("Answer field")
     ac_answer_field_label.setToolTip(
         "The name of the field that the answer should be gotten from."
     )
-    self.ac_answer_field_edit = QtWidgets.QLineEdit(self.ac_tab)
+    self.ac_answer_field_combo = OptionComboBox(self.ac_tab)
     self.ac_vl.addWidget(ac_answer_field_label, row, 0)
-    self.ac_vl.addWidget(self.ac_answer_field_edit, row, 1)
+    self.ac_vl.addWidget(self.ac_answer_field_combo, row, 1)
     row += 1
 
     ac_default_split_char_label = QtWidgets.QLabel("Default split character")
@@ -174,7 +212,7 @@ def ac_preferences_setup_ui(self, Preferences):
             )
         )
     )
-    self.ac_default_split_char_edit = QtWidgets.QLineEdit(self.ac_tab)
+    self.ac_default_split_char_edit = OptionLineEdit(self.ac_tab)
     self.ac_vl.addWidget(ac_default_split_char_label, row, 0)
     self.ac_vl.addWidget(self.ac_default_split_char_edit, row, 1)
     row += 1
@@ -189,8 +227,18 @@ def ac_preferences_setup_ui(self, Preferences):
 
 def ac_preferences_init(self, mw):
     qc = self.mw.col.conf
+    field_names = get_field_names(self.mw)
+
     self.form.ac_tag_edit.setText(qc["ac_tag"])
-    self.form.ac_answer_field_edit.setText(qc["ac_answer_field"])
+
+    self.form.ac_question_field_combo.clear()
+    self.form.ac_question_field_combo.addItems(field_names)
+    self.form.ac_question_field_combo.setCurrentText(qc["ac_question_field"])
+
+    self.form.ac_answer_field_combo.clear()
+    self.form.ac_answer_field_combo.addItems(field_names)
+    self.form.ac_answer_field_combo.setCurrentText(qc["ac_answer_field"])
+
     self.form.ac_default_split_char_edit.setText(qc["ac_default_split_char"])
 
 
@@ -198,7 +246,10 @@ def ac_preferences_accept(self):
     qc = self.mw.col.conf
 
     qc["ac_tag"] = self.form.ac_tag_edit.text()
-    qc["ac_answer_field"] = self.form.ac_answer_field_edit.text()
+
+    qc["ac_question_field"] = self.form.ac_question_field_combo.currentText()
+    qc["ac_answer_field"] = self.form.ac_answer_field_combo.currentText()
+
     qc["ac_default_split_char"] = self.form.ac_default_split_char_edit.text()
 
 
@@ -213,16 +264,77 @@ aqt.preferences.Preferences.accept = wrap(
 )
 
 
+# deck menu stuff
+
+
+def save_to_deckconf(self, key, getter):
+    deckconf = self.conf
+
+    def _save_to_deckconf(i):
+        deckconf[key] = getter()
+
+    return _save_to_deckconf
+
+
+def ac_dconf_load(self):
+    keys = DEFAULT_CONF.keys()
+
+    qc = self.mw.col.conf
+    deckconf = self.conf
+
+    conf = {}
+
+    for key in keys:
+        conf[key] = deckconf.get(key, qc[key])
+
+    field_names = get_field_names(self.mw)
+
+    self.form.ac_tag_edit.setText(conf["ac_tag"])
+
+    self.form.ac_question_field_combo.clear()
+    self.form.ac_question_field_combo.addItems(field_names)
+    self.form.ac_question_field_combo.setCurrentText(conf["ac_question_field"])
+
+    self.form.ac_answer_field_combo.clear()
+    self.form.ac_answer_field_combo.addItems(field_names)
+    self.form.ac_answer_field_combo.setCurrentText(conf["ac_answer_field"])
+
+    self.form.ac_default_split_char_edit.setText(conf["ac_default_split_char"])
+
+
+def ac_dconf_save(self):
+    qc = self.mw.col.conf
+    deckconf = self.conf
+
+    if self.form.ac_question_field_combo.has_changed:
+        deckconf["ac_question_field"] = self.form.ac_question_field_combo.currentText()
+
+    if self.form.ac_answer_field_combo.has_changed:
+        deckconf["ac_answer_field"] = self.form.ac_answer_field_combo.currentText()
+
+    if self.form.ac_default_split_char_edit.has_changed:
+        deckconf["ac_default_split_char"] = self.form.ac_default_split_char_edit.text()
+
+    if self.form.ac_tag_edit.has_changed:
+        deckconf["ac_tag"] = self.form.ac_tag_edit.text()
+
+
+aqt.forms.dconf.Ui_Dialog.setupUi = wrap(
+    aqt.forms.dconf.Ui_Dialog.setupUi, ac_preferences_setup_ui, pos="after"
+)
+aqt.deckconf.DeckConf.loadConf = wrap(
+    aqt.deckconf.DeckConf.loadConf, ac_dconf_load, pos="after"
+)
+aqt.deckconf.DeckConf.saveConf = wrap(
+    aqt.deckconf.DeckConf.saveConf, ac_dconf_save, pos="before"
+)
+
 # Set the default config
 
 
 def init_conf(self):
     qc = self.conf
-    keys = {
-        "ac_answer_field": ANSWER_FIELD_NAME,
-        "ac_tag": ANSWER_COUNT_TAG,
-        "ac_default_split_char": DEFAULT_SPLIT_CHAR,
-    }
+    keys = DEFAULT_CONF
 
     for k in keys:
         if k not in qc:
